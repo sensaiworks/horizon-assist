@@ -97,7 +97,7 @@ class Poller:
 
                 if dry_run:
                     win_label = f"[{window.title}]" if window else "[no window]"
-                    print(f"{'CHANGED' if changed else 'same   '} {hash_str}  {win_label}")
+                    print(f"{'CHANGED' if changed else 'same   '} {hash_str}  {win_label}", flush=True)
                 elif changed:
                     await on_change(state, png)
 

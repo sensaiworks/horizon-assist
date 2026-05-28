@@ -31,6 +31,8 @@ import anthropic
 
 from .models import MessageEvent
 
+_MAX_TOKENS = 1024
+
 EXTRACTION_PROMPT = """\
 You are analyzing a screenshot of a Windows remote desktop showing a chat application
 (Microsoft Teams or Symphony). Extract all visible chat messages that are NEW or
@@ -56,23 +58,55 @@ If no messages are visible: return [].
 
 class Extractor:
     def __init__(self, api_key: str, model: str, user_display_name: str) -> None:
-        self._client = anthropic.Anthropic(api_key=api_key)
+        self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._model = model
         self._user = user_display_name
 
     async def extract(self, png_bytes: bytes, window_title: str = "") -> list[MessageEvent]:
-        """
-        Send screenshot to Claude Vision, parse response into MessageEvent list.
+        """Send screenshot to Claude Vision, parse response into MessageEvent list."""
+        b64 = base64.b64encode(png_bytes).decode()
+        prompt = self._build_prompt()
 
-        TODO (Step 2):
-          1. base64-encode png_bytes
-          2. Build messages list with image content block
-          3. Call self._client.messages.create(model=..., max_tokens=1024, messages=...)
-          4. Extract text from response.content[0].text
-          5. Parse JSON — use _parse_response() below
-          6. Convert dicts to MessageEvent objects with window_title set
-        """
-        raise NotImplementedError
+        response = await self._client.messages.create(
+            model=self._model,
+            max_tokens=_MAX_TOKENS,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": b64,
+                            },
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ],
+        )
+
+        raw = response.content[0].text
+        items = self._parse_response(raw)
+        now = datetime.utcnow()
+        events = []
+        for item in items:
+            try:
+                events.append(
+                    MessageEvent(
+                        timestamp=now,
+                        speaker=item.get("speaker", "unknown"),
+                        message=item.get("message", ""),
+                        app=item.get("app", "unknown"),
+                        directed_at_user=bool(item.get("directed_at_user", False)),
+                        window_title=window_title,
+                    )
+                )
+            except Exception:
+                pass
+        return events
 
     def _parse_response(self, text: str) -> list[dict]:
         """Extract JSON array from model response, handling markdown fences."""

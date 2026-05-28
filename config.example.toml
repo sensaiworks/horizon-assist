@@ -1,5 +1,5 @@
 [mcp]
-server_path = "C:\\github\\horizon-mcp\\dist\\index.js"
+server_path = "C:\\path\\to\\horizon-mcp\\dist\\index.js"  # absolute path to compiled MCP server
 command     = "node"
 
 [polling]
@@ -28,4 +28,4 @@ mention_keywords = []           # extra keywords that count as directed at user
 cooldown_minutes = 5            # deduplicate window
 
 [user]
-display_name = "Dmitry"         # used in prompts to detect self-mentions
+display_name = "YourName"       # used in prompts to detect self-mentions

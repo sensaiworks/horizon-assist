@@ -1,7 +1,7 @@
 """
 Async wrapper around the horizon-mcp MCP server.
 
-Spawns `node C:\github\horizon-mcp\dist\index.js` as a subprocess and
+Spawns `node C:/github/horizon-mcp/dist/index.js` as a subprocess and
 communicates via the MCP stdio protocol using the `mcp` Python SDK.
 
 Usage:
@@ -18,7 +18,7 @@ TODO (Step 1): implement all methods below.
 from __future__ import annotations
 
 import base64
-from contextlib import asynccontextmanager
+import json
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
@@ -67,7 +67,6 @@ class HorizonMCPClient:
 
     async def list_windows(self) -> list[ProcessInfo]:
         """Return all visible windows."""
-        import json
         result = await self._call("list_windows")
         data = json.loads(result.content[0].text)
         return [ProcessInfo.from_mcp(d) for d in data]

@@ -48,10 +48,21 @@ def monitor(dry_run: bool):
 async def _run_monitor(config: dict, dry_run: bool) -> None:
     from src.mcp_client import HorizonMCPClient
     from src.poller import Poller
+    from src.extractor import Extractor
 
     mcp_cfg = config["mcp"]
     poll_cfg = config["polling"]
     win_cfg = config["windows"]
+    claude_cfg = config["claude"]
+    user_cfg = config["user"]
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+
+    extractor = Extractor(
+        api_key=api_key,
+        model=claude_cfg["vision_model"],
+        user_display_name=user_cfg["display_name"],
+    )
 
     async with HorizonMCPClient(
         server_path=mcp_cfg["server_path"],
@@ -67,9 +78,15 @@ async def _run_monitor(config: dict, dry_run: bool) -> None:
         )
 
         async def on_change(state, png: bytes) -> None:
-            print(f"CHANGED  {state.screenshot_hash}  [{state.window_title}]")
+            print(f"CHANGED  {state.screenshot_hash}  [{state.window_title}]", flush=True)
+            events = await extractor.extract(png, window_title=state.window_title)
+            for ev in events:
+                tag = " @YOU" if ev.directed_at_user else ""
+                print(f"  [{ev.app}] {ev.speaker}: {ev.message[:80]}{tag}", flush=True)
+            if not events:
+                print("  (no chat messages detected)", flush=True)
 
-        print(f"Starting monitor (dry_run={dry_run}, interval={poll_cfg['interval_seconds']}s) — Ctrl+C to stop")
+        print(f"Starting monitor (dry_run={dry_run}, interval={poll_cfg['interval_seconds']}s) — Ctrl+C to stop", flush=True)
         await poller.run(on_change=on_change, dry_run=dry_run)
 
 
