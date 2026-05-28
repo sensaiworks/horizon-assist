@@ -123,8 +123,7 @@ def query(question: str):
     """Ask a question about recorded conversations."""
     config = load_config()
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    # TODO: connect RAGPipeline, instantiate QueryAgent, call agent.query(question)
-    print("query not yet implemented — see CLAUDE.md Step 5")
+    _run_query(config, api_key, question)
 
 
 @cli.command()
@@ -132,8 +131,36 @@ def agent():
     """Start interactive query REPL."""
     config = load_config()
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    # TODO: connect RAGPipeline, instantiate QueryAgent, call agent.repl()
-    print("agent not yet implemented — see CLAUDE.md Step 6")
+    _run_query(config, api_key, question=None)
+
+
+def _run_query(config: dict, api_key: str, question: str | None) -> None:
+    from src.rag import RAGPipeline
+    from src.agent import QueryAgent
+
+    rag_cfg = config["rag"]
+    claude_cfg = config["claude"]
+
+    rag = RAGPipeline(
+        db_path=rag_cfg["db_path"],
+        collection_name=rag_cfg["collection_name"],
+        embedding_provider=rag_cfg["embedding_provider"],
+        voyage_api_key=os.environ.get("VOYAGE_API_KEY") or None,
+        top_k=rag_cfg["top_k"],
+    )
+    rag.connect()
+
+    agent_obj = QueryAgent(
+        api_key=api_key,
+        model=claude_cfg["query_model"],
+        rag=rag,
+        max_tokens=claude_cfg["max_tokens"],
+    )
+
+    if question:
+        agent_obj.query(question)
+    else:
+        agent_obj.repl()
 
 
 if __name__ == "__main__":

@@ -6,13 +6,8 @@ Two modes:
   2. Interactive REPL: `python main.py agent`
 
 Uses Claude Sonnet (claude-sonnet-4-6) for answer quality.
-Uses prompt caching (cache_control) on the system prompt — as conversations
-accumulate in RAG the context grows; caching saves cost.
-
-See Anthropic docs on cache_control:
-  https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
-
-TODO (Step 5): implement `query()` and `repl()`.
+Applies cache_control to the system prompt — it's stable across all queries
+so the first call writes it to cache; every subsequent call reads it cheaply.
 """
 
 from __future__ import annotations
@@ -33,33 +28,56 @@ the provided context, say so — do not guess.
 
 
 class QueryAgent:
-    def __init__(self, api_key: str, model: str, rag: RAGPipeline) -> None:
+    def __init__(self, api_key: str, model: str, rag: RAGPipeline, max_tokens: int = 1024) -> None:
         self._client = anthropic.Anthropic(api_key=api_key)
         self._model = model
         self._rag = rag
+        self._max_tokens = max_tokens
 
     def query(self, question: str) -> str:
-        """
-        One-shot query. Retrieve context from RAG, answer with Claude Sonnet.
-        Streams to stdout and returns full response text.
+        """Retrieve RAG context, stream an answer, return full response text."""
+        results = self._rag.query(question)
+        context = self._rag.format_context(results)
 
-        TODO (Step 5):
-          1. results = self._rag.query(question)
-          2. context = self._rag.format_context(results)
-          3. Build messages: [{role: user, content: f"Context:\n{context}\n\nQuestion: {question}"}]
-          4. Use self._client.messages.create with stream=True
-          5. Print streamed chunks, accumulate and return full text
-          6. Add cache_control to system prompt for cost savings
-        """
-        raise NotImplementedError
+        if context:
+            user_content = f"Context (extracted chat messages):\n{context}\n\nQuestion: {question}"
+        else:
+            user_content = f"Question: {question}\n\n(No relevant chat messages found in the database yet.)"
+
+        full_text = ""
+        with self._client.messages.stream(
+            model=self._model,
+            max_tokens=self._max_tokens,
+            system=[
+                {
+                    "type": "text",
+                    "text": SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[{"role": "user", "content": user_content}],
+        ) as stream:
+            for text in stream.text_stream:
+                print(text, end="", flush=True)
+                full_text += text
+        print()
+        return full_text
 
     def repl(self) -> None:
-        """
-        Interactive REPL loop. Type 'exit' or Ctrl+C to quit.
-
-        TODO (Step 6):
-          - Print welcome message
-          - Loop: input() → self.query() → print
-          - Handle KeyboardInterrupt gracefully
-        """
-        raise NotImplementedError
+        """Interactive REPL loop. Type 'exit' or Ctrl+C to quit."""
+        count = self._rag._collection.count() if self._rag._collection else 0
+        print(f"horizon-monitor agent — {count} events in database. Type 'exit' to quit.\n")
+        while True:
+            try:
+                question = input("You: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\nGoodbye.")
+                break
+            if not question:
+                continue
+            if question.lower() in ("exit", "quit", "bye"):
+                print("Goodbye.")
+                break
+            print("Agent: ", end="", flush=True)
+            self.query(question)
+            print()
