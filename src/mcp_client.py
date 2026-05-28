@@ -61,15 +61,18 @@ class HorizonMCPClient:
 
     async def screenshot(self, screen: int = 0) -> bytes:
         """Return raw PNG bytes for the given monitor index."""
-        # TODO: call "screenshot" tool, extract base64 from result.content[0].data
-        raise NotImplementedError
+        result = await self._call("screenshot", screen=screen)
+        b64: str = result.content[0].data
+        return base64.b64decode(b64)
 
     async def list_windows(self) -> list[ProcessInfo]:
         """Return all visible windows."""
-        # TODO: call "list_windows", parse JSON, return list[ProcessInfo]
-        raise NotImplementedError
+        import json
+        result = await self._call("list_windows")
+        data = json.loads(result.content[0].text)
+        return [ProcessInfo.from_mcp(d) for d in data]
 
     async def focus_window(self, target: str) -> str:
         """Bring window to foreground. Returns status string from server."""
-        # TODO: call "focus_window" with target=target
-        raise NotImplementedError
+        result = await self._call("focus_window", target=target)
+        return result.content[0].text

@@ -42,10 +42,35 @@ def cli():
 def monitor(dry_run: bool):
     """Start the monitoring loop."""
     config = load_config()
-    # TODO: wire up HorizonMCPClient, Poller, Extractor, RAGPipeline, Notifier
-    # and run the async poll loop.
-    # See CLAUDE.md §"Implementation order / Step 1" for the sequence.
-    print("monitor not yet implemented — see CLAUDE.md for implementation order")
+    asyncio.run(_run_monitor(config, dry_run))
+
+
+async def _run_monitor(config: dict, dry_run: bool) -> None:
+    from src.mcp_client import HorizonMCPClient
+    from src.poller import Poller
+
+    mcp_cfg = config["mcp"]
+    poll_cfg = config["polling"]
+    win_cfg = config["windows"]
+
+    async with HorizonMCPClient(
+        server_path=mcp_cfg["server_path"],
+        command=mcp_cfg["command"],
+    ) as client:
+        poller = Poller(
+            client=client,
+            interval=poll_cfg["interval_seconds"],
+            change_threshold=poll_cfg["change_threshold"],
+            screen_index=poll_cfg["screen_index"],
+            monitor_titles=win_cfg["monitor_titles"],
+            focus_before_shot=poll_cfg["focus_before_shot"],
+        )
+
+        async def on_change(state, png: bytes) -> None:
+            print(f"CHANGED  {state.screenshot_hash}  [{state.window_title}]")
+
+        print(f"Starting monitor (dry_run={dry_run}, interval={poll_cfg['interval_seconds']}s) — Ctrl+C to stop")
+        await poller.run(on_change=on_change, dry_run=dry_run)
 
 
 @cli.command()

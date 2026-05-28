@@ -76,15 +76,32 @@ class Poller:
         Poll forever. Calls `on_change(state: ScreenState, png: bytes)` when changed.
         If dry_run=True, prints changed/unchanged without calling on_change.
         """
-        # TODO: implement poll loop
-        # Pseudocode:
-        #   while True:
-        #     window = await self.find_horizon_window()
-        #     if window and self._focus: await self._client.focus_window(str(window.pid))
-        #     png = await self._client.screenshot(screen=self._screen)
-        #     changed, hash_str = self._detect_change(png)
-        #     state = ScreenState(screenshot_hash=hash_str, window_title=window.title if window else "", changed=changed)
-        #     if dry_run: print(f"{'CHANGED' if changed else 'same   '} {hash_str}")
-        #     elif changed: await on_change(state, png)
-        #     await asyncio.sleep(self._interval)
-        raise NotImplementedError
+        while True:
+            try:
+                window = await self.find_horizon_window()
+                if window and self._focus:
+                    await self._client.focus_window(str(window.pid))
+
+                png = await self._client.screenshot(screen=self._screen)
+                if not png:
+                    print("WARNING: empty screenshot bytes — check screen_index in config.toml")
+                    await asyncio.sleep(self._interval)
+                    continue
+
+                changed, hash_str = self._detect_change(png)
+                state = ScreenState(
+                    screenshot_hash=hash_str,
+                    window_title=window.title if window else "",
+                    changed=changed,
+                )
+
+                if dry_run:
+                    win_label = f"[{window.title}]" if window else "[no window]"
+                    print(f"{'CHANGED' if changed else 'same   '} {hash_str}  {win_label}")
+                elif changed:
+                    await on_change(state, png)
+
+            except Exception as exc:
+                print(f"ERROR in poll cycle: {exc}")
+
+            await asyncio.sleep(self._interval)
