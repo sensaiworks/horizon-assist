@@ -33,10 +33,16 @@ class RemoteController:
         client: HorizonMCPClient,
         focus_target: str = "PVDI",
         launch_wait: float = 1.5,
+        clipboard_sync: float = 0.6,
+        copy_timeout: float = 6.0,
     ) -> None:
         self._client = client
         self._focus_target = focus_target
         self._launch_wait = launch_wait
+        # How long redirection takes to sync the clipboard between local and remote,
+        # and how long to wait for a copied file to arrive before giving up.
+        self._clipboard_sync = clipboard_sync
+        self._copy_timeout = copy_timeout
 
     async def ensure_foreground(self) -> None:
         """Bring the local Horizon client to the foreground so input reaches the remote."""
@@ -123,3 +129,89 @@ class RemoteController:
         """Scroll the chat pane at (x, y) to reveal earlier/later messages."""
         await self.ensure_foreground()
         await self._client.scroll(x, y, direction, amount)
+
+    # ------------------------------------------------------- code-editing bridge
+    # Pull a file's text out of the remote editor, edit it locally (with AI that
+    # isn't available inside the VDI), and push the whole document back.
+    #
+    # The transport is the clipboard, NOT OCR. OCR loses indentation and only sees
+    # the visible region; type_text corrupts code via the editor's autocomplete /
+    # auto-indent. A Ctrl+A/Ctrl+C in the remote editor copies the *entire* file
+    # exactly; Horizon clipboard redirection syncs it to the local clipboard, where
+    # get_clipboard() reads it losslessly. The write path is the mirror image.
+    #
+    # PREREQUISITE: Horizon clipboard redirection must be enabled (it usually is).
+    # copy_from_remote() detects when it is not and raises a clear error.
+    # PREREQUISITE: the editor pane (not a sidebar/terminal) must hold focus inside
+    # the remote so Ctrl+A selects the document — screenshot first if unsure.
+
+    # Null bytes can't appear in a text file, so this never collides with content.
+    _COPY_SENTINEL = "\x00__horizon_pull__\x00"
+
+    async def copy_from_remote(self) -> str:
+        """Select-all + copy in the focused remote editor; return the full text.
+
+        Seeds the local clipboard with a sentinel, triggers the remote copy, then
+        polls until clipboard redirection delivers the file. Raises RuntimeError if
+        the clipboard never changes (redirection disabled, or nothing was focused).
+        """
+        await self.ensure_foreground()
+        await self._client.set_clipboard(self._COPY_SENTINEL)
+        await asyncio.sleep(self._clipboard_sync)
+        await self._client.key_combo(["Ctrl", "A"])
+        await asyncio.sleep(0.2)
+        await self._client.key_combo(["Ctrl", "C"])
+
+        waited = 0.0
+        poll = 0.3
+        while waited < self._copy_timeout:
+            await asyncio.sleep(poll)
+            waited += poll
+            text = await self._client.get_clipboard()
+            if text and text != self._COPY_SENTINEL:
+                return text
+        raise RuntimeError(
+            "Clipboard did not update after Ctrl+C — Horizon clipboard redirection "
+            "may be disabled, or no editor pane was focused in the remote session."
+        )
+
+    async def paste_to_remote(
+        self, text: str, *, replace_all: bool = True, save: bool = False
+    ) -> None:
+        """Replace the focused remote editor's contents with `text`.
+
+        Stages `text` on the local clipboard (redirection syncs it to the remote),
+        selects all + pastes, optionally saves, then restores the prior clipboard.
+        """
+        await self.ensure_foreground()
+        prior = ""
+        try:
+            prior = await self._client.get_clipboard()
+        except Exception:
+            pass
+        try:
+            await self._client.set_clipboard(text)
+            await asyncio.sleep(self._clipboard_sync)  # let redirection reach the remote
+            if replace_all:
+                await self._client.key_combo(["Ctrl", "A"])
+                await asyncio.sleep(0.15)
+            await self._client.key_combo(["Ctrl", "V"])
+            await asyncio.sleep(self._clipboard_sync)   # let the paste land
+            if save:
+                await self._client.key_combo(["Ctrl", "S"])
+                await asyncio.sleep(0.3)
+        finally:
+            try:
+                await self._client.set_clipboard(prior or "")
+            except Exception:
+                pass
+
+    async def open_file(self, path: str) -> None:
+        """Open `path` in the remote VS Code via the Quick Open palette (Ctrl+P)."""
+        await self.ensure_foreground()
+        await self._client.key_combo(["Ctrl", "P"])
+        await asyncio.sleep(0.4)
+        await self._client.type_text(path)
+        await asyncio.sleep(0.5)
+        await self._client.key_combo(["Enter"])
+        await asyncio.sleep(0.4)

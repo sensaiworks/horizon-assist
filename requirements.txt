@@ -1,11 +1,9 @@
 anthropic>=0.40.0
 mcp>=1.0.0
 chromadb>=0.5.0
-imagehash>=4.3.1
-Pillow>=10.0.0
+Pillow>=10.0.0   # tray icon rendering
 pydantic>=2.0.0
 tomli>=2.0.0; python_version < "3.11"   # stdlib `tomllib` only exists on 3.11+; backport for older
-plyer>=2.1.0
 python-dotenv>=1.0.0
 
 # Embeddings (choose one — see config.toml embedding_provider)

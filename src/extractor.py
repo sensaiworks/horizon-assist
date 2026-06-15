@@ -1,9 +1,11 @@
 """
 Claude Vision extraction — screenshot → (list[MessageEvent], is_lock_screen).
 
-Sends the PNG screenshot to Claude Haiku with a structured prompt.
-Returns parsed MessageEvent objects and a bool indicating if the remote
-desktop is showing a lock screen.
+Turns a screenshot the user *explicitly captured* during a consented assist session
+into structured notes. This is never run on a timer or in the background; it only
+runs when the user triggers a capture. The PNG of that one frame is sent to Claude
+Haiku (this is stated on the consent screen — see src/consent.py) and parsed into
+MessageEvent objects, plus a bool for whether the screen was locked (nothing to read).
 
 Model: claude-haiku-4-5-20251001 (fast, cheap, sufficient for UI parsing)
 """
@@ -22,29 +24,29 @@ from .models import MessageEvent
 _MAX_TOKENS = 1024
 
 EXTRACTION_PROMPT = """\
-You are analyzing a screenshot of a Windows remote desktop.
+You are analyzing a single screenshot that the user captured of their own
+remote-desktop session, to help them keep notes on what is on screen.
 
 Return a JSON object ONLY, no explanation, no markdown:
-{{
+{
   "lock_screen": true | false,
   "messages": [
-    {{
+    {
       "speaker": "Full Name or username",
       "message": "exact message text",
       "app": "teams" | "symphony" | "unknown",
       "channel": "conversation / channel / room / thread name shown in the UI",
-      "time": "the message's on-screen timestamp exactly as shown",
-      "directed_at_user": true | false
-    }}
+      "time": "the message's on-screen timestamp exactly as shown"
+    }
   ]
-}}
+}
 
 lock_screen is true if the screen shows a Windows lock screen (clock visible,
-"Press Ctrl+Alt+Delete to unlock", dark/black screen with no chat content).
+"Press Ctrl+Alt+Delete to unlock", dark/black screen with no content).
 
 If lock_screen is true, messages must be [].
 
-messages contains all visible chat messages from Microsoft Teams or Symphony.
+messages contains the visible chat messages from Microsoft Teams or Symphony.
 
 channel is the name of the open conversation, channel, room, or thread (e.g.
 "Deployments", "John Smith", "Trading Desk") — read it from the header or the
@@ -53,26 +55,24 @@ selected item in the sidebar. Use "" if you cannot tell.
 time is the timestamp shown next to or above the message, copied verbatim (e.g.
 "10:32 AM", "Yesterday 14:05", "Mon 09:14"). Use "" if no time is visible for it.
 
-directed_at_user is true if the message @mentions "{user}", uses their first name
-"{user}" directly, or is a direct/private message thread to them.
-
 If no chat app is visible or no messages are present, return messages: [].
 """
 
 
 class Extractor:
-    def __init__(self, api_key: str, model: str, user_display_name: str) -> None:
+    def __init__(self, api_key: str, model: str) -> None:
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._model = model
-        self._user = user_display_name
 
-    async def extract(self, png_bytes: bytes, window_title: str = "") -> tuple[list[MessageEvent], bool]:
+    async def extract(
+        self, png_bytes: bytes, window_title: str = "", session_id: str = ""
+    ) -> tuple[list[MessageEvent], bool]:
         """
-        Send screenshot to Claude Vision.
-        Returns (events, is_lock_screen).
+        Send one user-captured screenshot to Claude Vision.
+        Returns (events, is_lock_screen). Events are tagged with session_id.
         """
         b64 = base64.b64encode(png_bytes).decode()
-        prompt = self._build_prompt()
+        prompt = EXTRACTION_PROMPT
 
         response = await self._client.messages.create(
             model=self._model,
@@ -109,7 +109,7 @@ class Extractor:
                         app=item.get("app", "unknown"),
                         channel=(item.get("channel") or "").strip(),
                         chat_time=(item.get("time") or "").strip(),
-                        directed_at_user=bool(item.get("directed_at_user", False)),
+                        session_id=session_id,
                         window_title=window_title,
                     )
                 )
@@ -132,6 +132,3 @@ class Extractor:
         except json.JSONDecodeError:
             pass
         return [], False
-
-    def _build_prompt(self) -> str:
-        return EXTRACTION_PROMPT.format(user=self._user)

@@ -3,7 +3,7 @@ RAG pipeline — ChromaDB ingest and semantic search.
 
 Collection schema:
   - document : MessageEvent.message (the text to embed and search)
-  - metadata  : speaker, app, timestamp (ISO), directed_at_user, window_title
+  - metadata  : speaker, app, timestamp (ISO), session_id, channel, window_title
   - id        : MessageEvent.doc_id() — hash of speaker+message for deduplication
 
 Embedding providers (config.rag.embedding_provider):
@@ -118,7 +118,7 @@ class RAGPipeline:
                     "timestamp": e.timestamp.isoformat(),
                     "chat_time": e.chat_time,
                     "channel": e.channel,
-                    "directed_at_user": e.directed_at_user,
+                    "session_id": e.session_id,
                     "window_title": e.window_title,
                 }
                 for e, _ in new
@@ -126,8 +126,12 @@ class RAGPipeline:
         )
         return len(new)
 
-    def query(self, text: str, filter_directed: bool = False) -> list[dict]:
-        """Semantic search. Returns top-k results as dicts."""
+    def query(self, text: str, session_id: str | None = None) -> list[dict]:
+        """Semantic search over captured notes. Returns top-k results as dicts.
+
+        Pass session_id to restrict the search to one session's notes (used when
+        retention is session-only so a query never reaches another session's data).
+        """
         assert self._collection is not None, "call connect() first"
         count = self._collection.count()
         if count == 0:
@@ -138,8 +142,8 @@ class RAGPipeline:
             "n_results": min(self._top_k, count),
             "include": ["documents", "metadatas", "distances"],
         }
-        if filter_directed:
-            kwargs["where"] = {"directed_at_user": True}
+        if session_id:
+            kwargs["where"] = {"session_id": session_id}
 
         results = self._collection.query(**kwargs)
 
@@ -156,10 +160,33 @@ class RAGPipeline:
                 "timestamp": meta["timestamp"],
                 "chat_time": meta.get("chat_time", ""),
                 "channel": meta.get("channel", ""),
-                "directed_at_user": meta["directed_at_user"],
+                "session_id": meta.get("session_id", ""),
                 "distance": dist,
             })
         return output
+
+    def delete_session(self, session_id: str) -> None:
+        """Remove all vectors captured in one session (session-only retention)."""
+        if self._collection is None:
+            return
+        self._collection.delete(where={"session_id": session_id})
+
+    def delete_older_than(self, cutoff_iso: str) -> None:
+        """Remove vectors captured before cutoff_iso (for N-day retention).
+
+        ISO-8601 timestamps sort lexically, so a string $lt comparison is correct.
+        """
+        if self._collection is None:
+            return
+        self._collection.delete(where={"timestamp": {"$lt": cutoff_iso}})
+
+    def purge_all(self) -> None:
+        """Delete every vector in the collection (one-click 'purge all')."""
+        if self._client is None or self._collection is None:
+            return
+        self._client.delete_collection(self._collection.name)
+        # Recreate empty so the pipeline stays usable without reconnecting.
+        self.connect()
 
     def format_context(self, results: list[dict]) -> str:
         """Format RAG results as context string for the query agent prompt.

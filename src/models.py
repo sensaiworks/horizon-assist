@@ -12,12 +12,14 @@ def _utcnow() -> datetime:
 
 
 class MessageEvent(BaseModel):
-    timestamp: datetime = Field(default_factory=_utcnow)  # when we captured it
+    timestamp: datetime = Field(default_factory=_utcnow)  # when the user captured it
     speaker: str
     message: str
     app: Literal["teams", "symphony", "unknown"] = "unknown"
     window_title: str = ""
-    directed_at_user: bool = False
+    # The assist session this was captured in. Stored alongside the event so a
+    # session's data can be purged as a unit (session-only retention default).
+    session_id: str = ""
     # The chat's own timestamp as rendered on screen (e.g. "10:32 AM",
     # "Yesterday 14:05"). Free-form because each app formats it differently;
     # may be "" when not visible.
@@ -40,14 +42,6 @@ class MessageEvent(BaseModel):
         """
         content = f"{self.channel}|{self.speaker}|{self.chat_time}|{self.message[:120]}"
         return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
-
-
-class ScreenState(BaseModel):
-    timestamp: datetime = Field(default_factory=_utcnow)
-    screenshot_hash: str
-    window_title: str
-    changed: bool
-    extracted_events: list[MessageEvent] = Field(default_factory=list)
 
 
 class ProcessInfo(BaseModel):

@@ -1,110 +1,140 @@
-# horizon-monitor
+# horizon-assist
 
-> A background agent that *watches* a locked-down remote desktop the only way it can —
-> through pixels — and turns the chat happening inside it into searchable, queryable memory.
+A consent-based, local-first personal AI assistant for working inside Horizon/VDI
+sessions you own or are authorized to use.
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Many corporate setups run chat apps (Microsoft Teams, Symphony) **inside** a virtual
-desktop — an Omnissa Horizon session — that you can't script against directly: no APIs,
-no accessibility tree, just a window full of rendered pixels. `horizon-monitor` treats
-that constraint as the design: it periodically screenshots the session, uses a vision
-model to read the chat on screen, alerts you when someone is talking *to you*, and files
-every message into a local vector database so you can later ask, in plain English,
-*"what did John say about the deployment this morning?"*
+## What it is
 
-It captures the session through [`horizon-mcp`](https://github.com/dmitry-goubar/horizon-mcp),
-a small companion MCP server that exposes screenshot / window controls over stdio.
+`horizon-assist` is a Windows tool that helps you work inside a remote desktop running
+in the Omnissa Horizon Client. It does two things, and only ever when you ask it to:
 
-> **A note on scope.** This is a personal demo project by
-> [Dmitry Goubar](https://github.com/dmitry-goubar) — built to explore screen-grounded
-> agents, cost-aware vision pipelines, and local-first RAG. It is **read-only by design**:
-> it only screenshots and focuses windows. The single write action is an optional,
-> opt-in "Unlock Remote Desktop" tray command.
+- **Capture & ask** — you capture the current screen on demand; the tool reads the chat
+  on it into local notes and lets you ask questions about them in plain English.
+- **Code-editing bridge** — it pulls a file out of an editor in the remote session,
+  lets a local AI agent edit it, and pastes the whole document back — for VDIs that
+  block AI assistants inside the session.
 
----
+There is **no background monitoring**. Nothing is captured on a timer, nothing runs
+silently, and the tool does not watch for mentions of you or anyone else. Every capture
+and every query is a deliberate action you take.
 
-## How it works
+It captures the screen through [`horizon-mcp`](#companion-project), a small companion
+MCP server that exposes screenshot and window controls over stdio.
+
+## The problem it solves
+
+People working in locked-down VDI environments often have no AI assistance over their
+own work: the corporate session has no API, no accessibility tree, and frequently no
+licensed AI tooling, while the user has capable AI on their local machine. `horizon-assist`
+bridges that gap **locally and transparently** — it brings your own local AI to the work
+you are already doing in a session you are authorized to use, without sending your data
+to a third-party service beyond the model calls you explicitly trigger.
+
+## Scope & consent model
+
+Consent is explicit and per-session:
+
+- On first run you must acknowledge a **responsibility notice** (below).
+- At the **start of every session** a scope screen states exactly what will be accessed,
+  what (if anything) leaves the machine, where data is stored, the retention policy, and
+  how to clear it. **Nothing is captured until you accept it.**
+- A **Stop / clear session** control is always available, and there is a one-click
+  **Purge all stored data**.
+
+What the tool accesses, and only on an explicit action:
+
+- A **screenshot** of the remote-desktop window you point it at, when you click *Capture now*.
+- **Clipboard text**, only when you use the code-editing bridge.
+
+What it will **not** do: capture on a timer, run in the background, watch for mentions,
+or send anything you did not explicitly act on.
+
+## Data handling
+
+- **Local-first.** Captured notes live in local stores under `./data/` — a SQLite
+  database (`events.db`) and a ChromaDB vector store (`chromadb/`). Captured content is
+  **never uploaded**.
+- **Retention, minimal by default.** The default is **session-only**: everything captured
+  is deleted when the session ends. A configurable `"<N>d"` policy keeps notes for N days
+  and then expires them automatically.
+- **Purge.** `Purge all stored data` (tray) or `python main.py purge` deletes everything
+  in both stores.
+- **Transparency.** `View stored data` (tray) or `python main.py view` lists exactly what
+  is stored — it is not a black box.
+
+What leaves the machine, stated plainly:
+
+| Action  | What is sent                                              | To        |
+| ------- | --------------------------------------------------------- | --------- |
+| Capture | the single screenshot you captured (in `vision` mode)     | Anthropic (Claude Haiku) |
+| Ask     | your question + a few locally-retrieved note snippets     | Anthropic (Claude Sonnet) |
+
+Setting `[capture].mode = "ocr"` reads captured screens **locally** with Windows OCR and
+sends no image to the cloud (lower accuracy). Embeddings can also run fully offline
+(`embedding_provider = "local"`).
+
+## Intended users
+
+People who **own or are authorized for** the systems involved: consultants on their own
+infrastructure, researchers, personal or home VDI users, and IT-sanctioned enterprise
+deployments. It is not a tool for covertly extracting data from controlled corporate
+environments.
+
+## Responsibility notice
+
+You are responsible for ensuring your use of this tool complies with the policies of the
+systems you access and with any applicable laws and regulations. It is intended only for
+systems you own or are explicitly authorized to use. This tool does not hide its activity,
+does not run in the background, and is not a means of bypassing employer controls. If you
+are not authorized to use AI assistance against the system you are connecting to, do not
+use this tool against it.
+
+## Architecture & security
 
 ```
- ┌──────────────────────────┐
- │  Omnissa Horizon session │   chat apps render here (Teams / Symphony)
- └────────────┬─────────────┘
-              │ screenshot (every ~3s, via horizon-mcp)
-              ▼
-   ┌──────────────────┐   perceptual hash — did the screen actually change?
-   │  Poller          │──────────────┐ no  → drop the frame, spend nothing
-   └────────┬─────────┘              │
-            │ yes (changed frame)    ▼
-            ▼               (90%+ of frames stop here)
-   ┌──────────────────┐
-   │  Extractor       │   Claude Haiku (vision) → structured chat messages
-   └────────┬─────────┘
-            ├───────────────► Notifier   — Windows toast when a message is for you
+ You click an action (Capture / Ask / a remote command)
+            │
             ▼
-   ┌──────────────────┐
-   │  RAG pipeline    │   ChromaDB + embeddings (Voyage, or offline fallback)
-   └────────┬─────────┘
+   Consent gate ── per session, before anything is captured
+            │
             ▼
-   ┌──────────────────┐
-   │  Query agent     │   Claude Sonnet, streamed answers over your chat history
-   └──────────────────┘
+   Capture (one screenshot, on demand)  ──►  Extractor (Claude Haiku reads the text)
+            │                                         │
+            ▼                                         ▼
+   Code-editing bridge (clipboard)        Local stores:  SQLite notes + ChromaDB vectors
+                                                   │       (session-tagged, local only)
+                                                   ▼
+                                          Ask  ──►  Claude Sonnet over retrieved snippets
 ```
 
-The whole thing lives behind a Windows **system-tray icon** with status, recent
-messages, an "Ask…" dialog, and start/pause/stop controls.
-
-## Why it's built this way
-
-The interesting parts of this project are the constraints, not the line count:
-
-- **Pixels are the only interface.** The VDI is locked down, so chat is read with a
-  vision model over screenshots rather than any API. The extractor also detects the
-  Windows lock screen and goes quiet instead of hallucinating messages.
-- **A cheap gate in front of the expensive model.** A perceptual hash
-  (`imagehash.average_hash`) costs ~0 ms and filters out the 90 %+ of 3-second polls
-  where nothing changed (static screen, idle desktop). The vision API only ever sees
-  frames that actually differ.
-- **The right model for each job.** High-frequency screen reading uses **Claude Haiku**
-  (fast, ~20× cheaper); the low-frequency, quality-sensitive Q&A uses **Claude Sonnet**.
-- **Local-first and private.** Conversations are embedded and stored in **ChromaDB** on
-  disk. With no `VOYAGE_API_KEY`, it transparently falls back to an offline
-  sentence-transformers model — no chat content has to leave the machine to be searchable.
-- **No agent framework.** The pipeline is linear and deterministic, so it calls the
-  Claude API directly instead of dragging in LangChain/CrewAI/AutoGen abstractions.
-- **Decoupled capture.** Screen/window control is a separate, reusable MCP server
-  (`horizon-mcp`), so the monitoring logic never touches OS automation directly.
-
-## Tech stack
-
-| Area              | Choice                                              |
-| ----------------- | --------------------------------------------------- |
-| Language          | Python 3.11+ (`asyncio`)                            |
-| Vision extraction | Claude Haiku                                         |
-| Query agent       | Claude Sonnet (streaming, prompt-cached system)     |
-| Screen capture    | `horizon-mcp` MCP server (stdio) + MCP Python SDK   |
-| Change detection  | `imagehash` perceptual hashing                      |
-| Vector store      | ChromaDB (semantic search, persistent, local)       |
-| Structured store  | SQLite (timestamps, channels, exact/temporal queries) |
-| Embeddings        | `voyage-3` (API) or `all-MiniLM-L6-v2` (offline)    |
-| Data models       | Pydantic v2                                         |
-| UI                | `pystray` tray icon + Tk "Ask…" dialog              |
-| Notifications     | `plyer` Windows toasts                              |
+- **Local-first storage.** SQLite + ChromaDB on disk under `./data/` (gitignored).
+  Each note is tagged with its session id so a session's data can be purged as a unit.
+- **What is sent and when** is the table above — only on actions you take.
+- **How to purge:** end the session (session-only retention clears it automatically) or
+  run the explicit purge action.
+- **Remote control is opt-in.** Write actions into the session (unlock, launch an app,
+  the code-editing bridge) are gated behind `[control].enabled`, off by default, and only
+  run when you trigger them. The tool does not conceal these actions.
+- **Secrets.** `ANTHROPIC_API_KEY` and the optional `HORIZON_PASSWORD` live in `.env`
+  (gitignored). The password is used only by the explicit unlock action, pasted into the
+  login prompt, and cleared from the clipboard afterward.
 
 ## Requirements
 
-- **Python 3.11+** — uses the stdlib `tomllib`; on older Pythons the `tomli` backport is
-  installed automatically from `requirements.txt`.
+- **Python 3.11+** (uses stdlib `tomllib`; the `tomli` backport installs automatically on
+  older versions).
 - **Node.js** — to run the companion `horizon-mcp` server.
 - An **`ANTHROPIC_API_KEY`**.
 
 ## Setup
 
 ```powershell
-git clone https://github.com/dmitry-goubar/horizon-monitor.git
-cd horizon-monitor
+git clone https://github.com/sensaiworks/horizon-assist.git
+cd horizon-assist
 
 python -m venv .venv
 .venv\Scripts\Activate.ps1
@@ -120,87 +150,55 @@ out of version control.
 ## Usage
 
 ```powershell
-# Production: system-tray icon (launches stopped — click "Start" to begin monitoring)
+# System-tray launcher: click "Start assist session", accept the consent screen,
+# then use Capture now / Ask / View stored data / Stop / Purge.
 .venv\Scripts\pythonw main.py tray
-# ...or double-click "Start horizon-monitor.bat"
+# ...or double-click "Start horizon-assist.bat"
 
-# Debug the poll loop only — no LLM calls, prints changed/unchanged each tick
-python main.py monitor --dry-run
+# Interactive consented session in the terminal
+python main.py session
+#   assist> capture
+#   assist> ask what did John say about the deployment?
+#   assist> view
+#   assist> exit            (clears session data under session-only retention)
 
-# Headless monitoring with vision extraction (terminal)
-python main.py monitor
+# Inspect / clear stored data
+python main.py view
+python main.py purge
 
-# One-shot question over the recorded conversations
-python main.py query "what did John say about the deployment?"
-
-# Interactive Q&A REPL
-python main.py agent
-
-# Remote control (opt-in; requires [control].enabled = true)
+# Opt-in remote control + code-editing bridge (requires [control].enabled = true)
 python main.py remote foreground
-python main.py remote launch "Microsoft Teams"
-python main.py remote unlock
+python main.py remote open "src/app.py"
+python main.py remote read-file --out data/pull.txt   # pull a file out losslessly
+python main.py remote write-file data/pull.txt --save # edit locally, push it back
 ```
+
+### Code-editing bridge
+
+Corporate VDIs often run an IDE (e.g. VS Code) but block AI assistants inside the session.
+This bridge brings the AI to the code: it pulls a file out of the remote editor, lets a
+local agent edit it, and pastes the whole document back. The transport is the **clipboard**
+via Horizon clipboard redirection — `Ctrl+A`/`Ctrl+C` in the remote editor copies the
+entire file exactly, `read-file` captures it losslessly, and `write-file` stages the new
+text and pastes it. It requires clipboard redirection to be enabled (it usually is);
+`read-file` reports clearly if it is not.
 
 ## Configuration
 
-All tunables live in `config.toml`: poll interval, change-detection threshold, monitored
-window titles, model IDs, embedding provider, and notification cooldown. API keys and the
-optional remote-desktop password live in `.env`. See `config.example.toml` and
-`.env.example` for the full set of options.
+All tunables live in `config.toml` (see `config.example.toml`): the MCP server path,
+window titles to capture, capture mode (`vision`/`ocr`) and screen index, retention,
+model IDs, and the embedding provider. API keys and the optional remote-desktop password
+live in `.env`.
 
-**Storage.** Each extracted message is written to two local stores under `./data/`
-(gitignored), keyed on the same content hash so they stay in sync:
+## Companion project
 
-- **ChromaDB** (`./data/chromadb`) — embeddings for semantic search.
-- **SQLite** (`./data/events.db`) — the structured source of truth, retaining the
-  message's on-screen time and channel for exact and time-ranged queries; it also acts
-  as the dedup gate so each message is embedded and notified exactly once.
-
-**Embeddings.** The RAG pipeline uses `voyage-3` when `embedding_provider = "voyage"` and
-`VOYAGE_API_KEY` is set; otherwise it falls back automatically to the offline
-`all-MiniLM-L6-v2` sentence-transformers model (~100 MB on first download).
-
-## Remote control (opt-in)
-
-Monitoring is read-only, but the tool can also *drive* the session when you ask it to —
-useful when a chat app is minimised inside the remote, or the desktop is locked. Actions
-are exposed in the tray and via `python main.py remote <action>`:
-
-- **Unlock** — sends Ctrl+Alt+Del to the remote and enters `HORIZON_PASSWORD` (pasted, then
-  the clipboard is restored so the secret doesn't linger).
-- **Launch / activate an app** — drives the remote's own Start menu
-  (`key_combo(["Win"])` → type name → Enter), since apps inside the VDI aren't local
-  windows and can't be focused directly.
-- **Bring Horizon to front**, **run a command**, **send a reply**.
-
-These are **write actions that type/click into a corporate desktop and steal local focus**,
-so they are gated behind `[control].enabled` (off by default), never run automatically, and
-only fire when you trigger them.
-
-## Privacy & safety
-
-- **Read-only monitoring** — the polling loop only screenshots, lists, and focuses windows;
-  it never types or clicks. Control actions are a separate, opt-in, user-triggered path.
-- **Local storage** — extracted chat lives in local ChromaDB + SQLite files, never uploaded.
-- **Secret handling** — `HORIZON_PASSWORD` is read only by the unlock action, pasted into the
-  login prompt, cleared from the clipboard afterward, and never logged or sent to any API.
-  Leave it blank (and `[control].enabled = false`) to disable the write path entirely.
-
-## Project status
-
-Working end to end: capture → change detection → vision extraction → notifications → RAG
-ingest → query agent, all wrapped in a tray UI. Planned next: give the interactive agent
-direct access to `horizon-mcp` tools (e.g. "show me what's on screen right now" alongside
-"summarize today's Teams threads").
+[`horizon-mcp`](https://github.com/sensaiworks/horizon-mcp) — the MCP server that provides
+screenshot and window control over stdio. It is run, not modified, by this project.
 
 ## Author
 
-**Dmitry Goubar** — [@dmitry-goubar](https://github.com/dmitry-goubar)
-
-Companion project: [`horizon-mcp`](https://github.com/dmitry-goubar/horizon-mcp) — the
-MCP server that provides screenshot and window control.
+**Mike Lezinsky** — SensAI Works ([hello@sensaiworks.com](mailto:hello@sensaiworks.com))
 
 ## License
 
-Released under the [MIT License](LICENSE). © 2026 Dmitry Goubar.
+Released under the [MIT License](LICENSE). © 2026 SensAI Works.
