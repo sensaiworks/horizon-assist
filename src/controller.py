@@ -76,13 +76,37 @@ class RemoteController:
     async def bring_to_front(self) -> None:
         await self.ensure_foreground()
 
+    async def _focus_remote_surface(self) -> None:
+        """Click the centre of the Horizon window so the REMOTE surface gets input focus.
+
+        ensure_foreground() only makes the client window the local foreground; on a
+        lock/login screen that is NOT enough — keystrokes reach the remote session
+        only once the remote surface itself has focus, which a click inside the window
+        provides. Field-tested: Ctrl+Alt+Del did nothing until a click landed first.
+
+        Uses the window rectangle (virtual-desktop coords) so the click is correct on
+        any monitor/resolution; click() with no screen index also uses virtual coords.
+        Best-effort — skips silently if the rect is unavailable (older horizon-mcp).
+        """
+        rect = await self._client.get_window_rect(self._focus_target)
+        try:
+            cx = int(rect["Left"]) + int(rect["Width"]) // 2
+            cy = int(rect["Top"]) + int(rect["Height"]) // 2
+        except (KeyError, TypeError, ValueError):
+            return  # rect unavailable — skip rather than guess a coordinate
+        await self._client.click(cx, cy)
+        await asyncio.sleep(0.3)
+
     async def unlock(self, password: str) -> None:
         """Send Ctrl+Alt+Del to the remote, then enter the password.
 
         Uses paste_text (more reliable than typing in a remote password field) and
         restores the prior clipboard afterward so the secret does not linger there.
+        Requires Horizon clipboard redirection to be enabled so the paste reaches the
+        remote; without it the field stays empty (see _focus_remote_surface notes).
         """
         await self.ensure_foreground()
+        await self._focus_remote_surface()                       # so the SAS reaches the remote
         await self._client.key_combo(["Ctrl", "Alt", "Insert"])  # Horizon's Ctrl+Alt+Del
         await asyncio.sleep(2.5)                                 # wait for the login prompt
         if password:

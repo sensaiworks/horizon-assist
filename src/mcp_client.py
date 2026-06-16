@@ -119,6 +119,27 @@ class HorizonMCPClient:
                 return {"Title": data}
         return data if isinstance(data, dict) else {"Title": str(data)}
 
+    async def get_window_rect(self, target: str) -> dict:
+        """Return a window's rectangle as {Title, Pid, Left, Top, Right, Bottom,
+        Width, Height} in virtual-desktop coordinates. Pass a PID or partial title.
+
+        Used to click the centre of a window in absolute virtual coordinates (which
+        is what click() uses when no screen index is given). Returns {} if the tool
+        is unavailable (older horizon-mcp) or the window is not found.
+        """
+        try:
+            result = await self._call("get_window_rect", target=target)
+        except Exception:
+            return {}
+        raw = self._first_text(result)
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
     async def press_key(self, key: str) -> str:
         """Send a key or key combination to the focused window."""
         result = await self._call("press_key", key=key)
