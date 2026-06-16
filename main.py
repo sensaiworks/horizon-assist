@@ -157,7 +157,32 @@ def session():
     "--save/--no-save", default=False,
     help="write-file: press Ctrl+S in the remote after pasting",
 )
-def remote(action: str, value: str, out: str, save: bool):
+@click.option(
+    "--ocr", is_flag=True,
+    help="read-file: read via local OCR (screenshot) instead of the clipboard — "
+         "use when the VDI blocks clipboard copy-out",
+)
+@click.option(
+    "--pages", default=1, show_default=True,
+    help="read-file --ocr: OCR up to N screens, scrolling between them, and stitch",
+)
+@click.option(
+    "--region", default="",
+    help="read-file --ocr: limit OCR to 'x,y,w,h' (the editor pane; important on "
+         "multi-monitor setups so it targets the Horizon client)",
+)
+@click.option(
+    "--scroll-at", default="",
+    help="read-file --ocr: scroll at 'x,y' over the scrollable pane between pages",
+)
+@click.option(
+    "--scroll-amount", default=10, show_default=True,
+    help="read-file --ocr: wheel notches to scroll between pages",
+)
+def remote(
+    action: str, value: str, out: str, save: bool,
+    ocr: bool, pages: int, region: str, scroll_at: str, scroll_amount: int,
+):
     """Drive the remote Horizon session (WRITE actions; requires [control].enabled).
 
     Examples:
@@ -170,6 +195,11 @@ def remote(action: str, value: str, out: str, save: bool):
       python main.py remote open "src/app.py"            # focus a file in remote VS Code
       python main.py remote read-file --out data/pull.txt
       python main.py remote write-file data/pull.txt --save
+
+    When the VDI blocks clipboard copy-out, read with OCR instead of the clipboard:
+      python main.py remote read-file --ocr --out data/pull.txt
+      python main.py remote read-file --ocr --pages 5 \\
+          --region 700,150,820,820 --scroll-at 1100,450 --out data/pull.txt
     """
     config = load_config()
     ctl = config.get("control", {})
@@ -178,11 +208,31 @@ def remote(action: str, value: str, out: str, save: bool):
             "Remote control disabled — set [control].enabled = true in config.toml"
         )
     authorization_banner()
-    asyncio.run(_run_remote(config, action, value, out, save))
+    asyncio.run(
+        _run_remote(config, action, value, out, save, ocr, pages, region, scroll_at, scroll_amount)
+    )
+
+
+def _parse_ints(s: str, n: int, label: str) -> list[int] | None:
+    """Parse 'a,b,...' into n ints; None if empty. Raises on a malformed value."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        parts = [int(p) for p in s.replace(" ", "").split(",") if p != ""]
+    except ValueError:
+        raise click.ClickException(f"{label}: expected {n} integers like 'a,b', got {s!r}")
+    if len(parts) != n:
+        raise click.ClickException(
+            f"{label}: expected {n} comma-separated integers, got {len(parts)} ({s!r})"
+        )
+    return parts
 
 
 async def _run_remote(
-    config: dict, action: str, value: str, out: str, save: bool
+    config: dict, action: str, value: str, out: str, save: bool,
+    ocr: bool = False, pages: int = 1, region: str = "",
+    scroll_at: str = "", scroll_amount: int = 10,
 ) -> None:
     from src.mcp_client import HorizonMCPClient
     from src.controller import RemoteController
@@ -223,7 +273,17 @@ async def _run_remote(
                 raise click.ClickException("'open' needs a file path")
             await c.open_file(value)
         elif action == "read-file":
-            text = await c.copy_from_remote()
+            if ocr:
+                reg = _parse_ints(region, 4, "--region")
+                sat = _parse_ints(scroll_at, 2, "--scroll-at")
+                text = await c.read_remote_ocr(
+                    region=tuple(reg) if reg else None,
+                    scroll_at=tuple(sat) if sat else None,
+                    max_pages=pages,
+                    scroll_amount=scroll_amount,
+                )
+            else:
+                text = await c.copy_from_remote()
             if out:
                 out_path = Path(out)
                 out_path.parent.mkdir(parents=True, exist_ok=True)

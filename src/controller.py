@@ -23,6 +23,7 @@ remote desktop and steal local focus. They must be user-triggered, never automat
 from __future__ import annotations
 
 import asyncio
+import json
 
 from .mcp_client import HorizonMCPClient
 
@@ -194,8 +195,78 @@ class RemoteController:
                 return text
         raise RuntimeError(
             "Clipboard did not update after Ctrl+C — Horizon clipboard redirection "
-            "may be disabled, or no editor pane was focused in the remote session."
+            "may be disabled, or no editor pane was focused in the remote session.\n"
+            "If this VDI blocks clipboard copy-out, read with OCR instead "
+            "(remote read-file --ocr)."
         )
+
+    async def read_remote_ocr(
+        self,
+        *,
+        region: tuple[int, int, int, int] | None = None,
+        scroll_at: tuple[int, int] | None = None,
+        max_pages: int = 1,
+        scroll_amount: int = 10,
+    ) -> str:
+        """Read on-screen text from the remote with local Windows OCR — no clipboard.
+
+        Locked-down VDIs often block clipboard copy-OUT, so the bridge cannot pull a
+        file with Ctrl+C. This reads it the way a person would by hand instead:
+        screenshot the remote and OCR it locally (free, offline — nothing leaves the
+        machine). For content taller than the viewport, pass max_pages > 1 and
+        scroll_at=(x, y) over the scrollable pane; each screen is OCR'd and stitched
+        onto the previous one with the overlapping lines removed, stopping early once
+        a page adds nothing new (bottom reached). region=(x, y, w, h) restricts OCR to
+        the editor pane so surrounding UI chrome is not captured — on a multi-monitor
+        setup pass the region where the Horizon client actually is.
+
+        NOTE: OCR is not byte-exact for code (indentation/glyphs can drift). It is for
+        reading, not a lossless pull; pair it with the paste-back write path, which IS
+        exact, rather than trusting the OCR text verbatim.
+        """
+        await self.ensure_foreground()
+        x, y, w, h = region or (None, None, None, None)
+        acc: list[str] = []
+        for page in range(max(1, max_pages)):
+            raw = await self._client.ocr(x=x, y=y, width=w, height=h)
+            before = len(acc)
+            acc = self._stitch(acc, self._ocr_lines(raw))
+            grew = len(acc) > before
+            if page + 1 >= max_pages or scroll_at is None:
+                break
+            if page > 0 and not grew:
+                break  # nothing new since the last page — reached the bottom
+            await self._client.scroll(scroll_at[0], scroll_at[1], "down", scroll_amount)
+            await asyncio.sleep(0.5)  # let the pane settle before the next capture
+        return "\n".join(acc)
+
+    @staticmethod
+    def _ocr_lines(raw: str) -> list[str]:
+        """Pull the ordered text lines out of horizon-mcp's ocr JSON ({text, lines})."""
+        try:
+            data = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            return (raw or "").splitlines()
+        if isinstance(data, dict):
+            lines = data.get("lines")
+            if isinstance(lines, list):
+                return [str(ln) for ln in lines]
+            return str(data.get("text", "")).splitlines()
+        return str(data).splitlines()
+
+    @staticmethod
+    def _stitch(acc: list[str], new: list[str]) -> list[str]:
+        """Append `new` to `acc`, dropping the longest run of lines they share at the
+        seam (the scroll overlap). Exact-match only — OCR noise between captures can
+        still leave a little duplication, so prefer a scroll_amount near a full page."""
+        if not acc:
+            return list(new)
+        if not new:
+            return acc
+        for k in range(min(len(acc), len(new)), 0, -1):
+            if acc[-k:] == new[:k]:
+                return acc + new[k:]
+        return acc + new
 
     async def paste_to_remote(
         self, text: str, *, replace_all: bool = True, save: bool = False
