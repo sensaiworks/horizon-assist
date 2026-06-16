@@ -169,19 +169,33 @@ python main.py purge
 # Opt-in remote control + code-editing bridge (requires [control].enabled = true)
 python main.py remote foreground
 python main.py remote open "src/app.py"
-python main.py remote read-file --out data/pull.txt   # pull a file out losslessly
-python main.py remote write-file data/pull.txt --save # edit locally, push it back
+python main.py remote read-file --out data/pull.txt        # pull a file out via the clipboard
+python main.py remote read-file --ocr --out data/pull.txt  # ...or read it locally with OCR
+python main.py remote write-file data/pull.txt --save      # edit locally, paste it back
 ```
 
 ### Code-editing bridge
 
 Corporate VDIs often run an IDE (e.g. VS Code) but block AI assistants inside the session.
-This bridge brings the AI to the code: it pulls a file out of the remote editor, lets a
-local agent edit it, and pastes the whole document back. The transport is the **clipboard**
-via Horizon clipboard redirection — `Ctrl+A`/`Ctrl+C` in the remote editor copies the
-entire file exactly, `read-file` captures it losslessly, and `write-file` stages the new
-text and pastes it. It requires clipboard redirection to be enabled (it usually is);
-`read-file` reports clearly if it is not.
+This bridge brings the AI to the code: it reads a file out of the remote editor, lets a
+local agent edit it, and pastes the whole document back. Each direction uses whatever
+transport the VDI permits:
+
+- **Write (local → remote): the clipboard.** `write-file` stages the new text on the
+  clipboard and pastes it into the focused remote editor. This path is exact.
+- **Read (remote → local): the clipboard if copy-out is allowed, otherwise OCR.** Where
+  Horizon clipboard redirection permits copy-out, `read-file` copies the file with
+  `Ctrl+A`/`Ctrl+C` and captures it losslessly. Many locked-down VDIs allow paste-in but
+  **block copy-out**; there, `read-file --ocr` reads the screen the way you would by hand —
+  it screenshots the remote and runs local Windows OCR (free, offline, nothing leaves the
+  machine), scrolling and stitching across screens with `--pages`/`--scroll-at` for files
+  taller than the viewport. OCR is for reading, not a byte-exact pull, so it is paired with
+  the exact paste-back write path. Use `--region x,y,w,h` to target the editor pane — and,
+  on multi-monitor setups, the screen the Horizon client is on.
+
+Before sending any input the bridge verifies the Horizon client actually holds the
+foreground and refuses to act otherwise, so keystrokes and clipboard actions are never sent
+to a local window by mistake.
 
 ## Configuration
 
