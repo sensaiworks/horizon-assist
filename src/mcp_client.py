@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import json
+from contextlib import AsyncExitStack
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
@@ -35,25 +36,34 @@ class HorizonMCPClient:
         self._server_path = server_path
         self._command = command
         self._session: ClientSession | None = None
-        self._cm = None
+        self._stack: AsyncExitStack | None = None
 
     async def __aenter__(self) -> "HorizonMCPClient":
+        # Drive both context managers through one AsyncExitStack so they are
+        # entered and unwound in the same task — the stdio client and ClientSession
+        # use anyio task groups internally, which raise "exit cancel scope in a
+        # different task" if their __aexit__ is hand-called out of order.
         params = StdioServerParameters(
             command=self._command,
             args=[self._server_path],
         )
-        self._cm = stdio_client(params)
-        read, write = await self._cm.__aenter__()
-        self._session = ClientSession(read, write)
-        await self._session.__aenter__()
+        self._stack = AsyncExitStack()
+        read, write = await self._stack.enter_async_context(stdio_client(params))
+        self._session = await self._stack.enter_async_context(ClientSession(read, write))
         await self._session.initialize()
         return self
 
     async def __aexit__(self, *exc) -> None:
-        if self._session:
-            await self._session.__aexit__(*exc)
-        if self._cm:
-            await self._cm.__aexit__(*exc)
+        # Never let teardown raise: anyio can emit a spurious cancel-scope error
+        # while closing the stdio subprocess, and if __aexit__ raised it would
+        # mask the real exception from the `async with` body. Returning None (not
+        # True) still lets that body exception propagate.
+        stack, self._stack, self._session = self._stack, None, None
+        if stack is not None:
+            try:
+                await stack.aclose()
+            except (RuntimeError, BaseExceptionGroup):
+                pass
 
     async def _call(self, tool: str, **kwargs: Any) -> Any:
         assert self._session, "Client not connected — use async with"
@@ -86,6 +96,28 @@ class HorizonMCPClient:
         """Bring window to foreground. Returns status string from server."""
         result = await self._call("focus_window", target=target)
         return result.content[0].text
+
+    async def get_foreground_window(self) -> dict:
+        """Return {'Title': str, 'Pid': int} for the window holding LOCAL focus.
+
+        Used to verify the Horizon client is actually frontmost before we send
+        input — synthetic input goes to the local foreground window, so if the
+        client is not it, keystrokes/clipboard ops would leak into a local app.
+        """
+        result = await self._call("get_foreground_window")
+        raw = self._first_text(result)
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {"Title": raw}          # plain text — treat it as the title
+        if isinstance(data, str):          # double-encoded JSON string — unwrap once
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError:
+                return {"Title": data}
+        return data if isinstance(data, dict) else {"Title": str(data)}
 
     async def press_key(self, key: str) -> str:
         """Send a key or key combination to the focused window."""
@@ -144,10 +176,6 @@ class HorizonMCPClient:
         return self._first_text(
             await self._call("scroll", x=x, y=y, direction=direction, amount=amount)
         )
-
-    async def get_foreground_window(self) -> str:
-        """Return the title/info of the currently focused local window."""
-        return self._first_text(await self._call("get_foreground_window"))
 
     async def ocr(
         self,

@@ -45,9 +45,31 @@ class RemoteController:
         self._copy_timeout = copy_timeout
 
     async def ensure_foreground(self) -> None:
-        """Bring the local Horizon client to the foreground so input reaches the remote."""
-        await self._client.focus_window(self._focus_target)
-        await asyncio.sleep(0.4)
+        """Bring the local Horizon client to the foreground so input reaches the remote.
+
+        horizon-mcp injects input into the LOCAL OS; it only reaches the remote
+        desktop while the Horizon client window holds local foreground. Windows'
+        foreground-lock rules mean focus_window does not always succeed (a local
+        app can keep or re-steal the front), so we VERIFY the client is frontmost
+        and refuse to proceed otherwise — sending keystrokes/clipboard ops blindly
+        would leak them into whatever local window is focused (e.g. a local editor).
+        """
+        target = self._focus_target.lower()
+        for _ in range(3):
+            await self._client.focus_window(self._focus_target)
+            await asyncio.sleep(0.4)
+            try:
+                fg = await self._client.get_foreground_window()
+            except Exception:
+                return  # older horizon-mcp without the tool — fall back to old behaviour
+            if target in str(fg.get("Title", "")).lower():
+                return
+        fg_title = str(fg.get("Title", "")) or "<unknown>"
+        raise RuntimeError(
+            f"Horizon client '{self._focus_target}' is not the foreground window "
+            f"(foreground is {fg_title!r}). Aborting so input is not sent to the "
+            f"local machine — click the Horizon window to give it focus and retry."
+        )
 
     # alias used by the tray / CLI when the user just wants the window up front
     async def bring_to_front(self) -> None:
