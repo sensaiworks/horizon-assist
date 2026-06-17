@@ -97,34 +97,30 @@ class RemoteController:
         await self._client.click(cx, cy)
         await asyncio.sleep(0.3)
 
-    async def unlock(self, password: str) -> None:
-        """Send Ctrl+Alt+Del to the remote, then enter the password.
+    async def unlock(self, password: str, submit: bool = True) -> None:
+        """Send Ctrl+Alt+Del to the remote, then TYPE the password into the logon field.
 
-        Uses paste_text (more reliable than typing in a remote password field) and
-        restores the prior clipboard afterward so the secret does not linger there.
-        Requires Horizon clipboard redirection to be enabled so the paste reaches the
-        remote; without it the field stays empty (see _focus_remote_surface notes).
+        The Windows secure logon field blocks clipboard paste (Ctrl+V), so the password
+        is typed, not pasted — horizon-mcp paces each keystroke so it survives the
+        laptop -> Horizon -> remote-logon round trip. Ctrl+A first selects any existing
+        content so a retry replaces rather than appends to a half-filled field.
+
+        submit=True presses Enter to sign in; submit=False enters the password without
+        committing, so the caller can verify the field before spending a login attempt.
         """
         await self.ensure_foreground()
         await self._focus_remote_surface()                       # so the SAS reaches the remote
         await self._client.key_combo(["Ctrl", "Alt", "Insert"])  # Horizon's Ctrl+Alt+Del
         await asyncio.sleep(2.5)                                 # wait for the login prompt
         if password:
-            prior = ""
-            try:
-                prior = await self._client.get_clipboard()
-            except Exception:
-                pass
-            try:
-                await self._client.paste_text(password)
+            # The logon field is focused after the SAS; select any pre-existing content
+            # so a repeat attempt does not append to a half-filled field.
+            await self._client.key_combo(["Ctrl", "A"])
+            await asyncio.sleep(0.2)
+            await self._client.type_text(password)
+            if submit:
                 await asyncio.sleep(0.3)
                 await self._client.key_combo(["Enter"])
-            finally:
-                # Clear/restore the clipboard so the password does not persist.
-                try:
-                    await self._client.set_clipboard(prior or "")
-                except Exception:
-                    pass
 
     async def open_start(self) -> None:
         await self.ensure_foreground()
